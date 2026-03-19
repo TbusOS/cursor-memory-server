@@ -24,19 +24,19 @@ show_help() {
   echo "  bash install.sh <command> [options]"
   echo ""
   echo -e "${BOLD}命令:${NC}"
-  echo -e "  ${CYAN}global${NC}              只安装 MCP Server（全局生效，所有项目可用）"
+  echo -e "  ${CYAN}global${NC}              全局安装（MCP Server + Hooks + Cursor Rule）"
   echo -e "  ${CYAN}project <dir>${NC}       为指定项目安装 Cursor Rule（需先完成 global 安装）"
-  echo -e "  ${CYAN}all <dir>${NC}           全部安装：MCP Server + 指定项目的 Cursor Rule"
+  echo -e "  ${CYAN}all <dir>${NC}           全部安装：全局 + 指定项目的 Cursor Rule"
   echo -e "  ${CYAN}help${NC}                显示此帮助信息"
   echo ""
   echo -e "${BOLD}示例:${NC}"
-  echo "  bash install.sh global                          # 安装 MCP Server（全局）"
+  echo "  bash install.sh global                          # 全局安装"
   echo "  bash install.sh project /path/to/my-app         # 为 my-app 项目添加记忆规则"
   echo "  bash install.sh all /path/to/my-app             # 全部搞定"
   echo "  bash install.sh project .                       # 为当前目录项目添加记忆规则"
   echo ""
   echo -e "${BOLD}安装的内容:${NC}"
-  echo "  global  -> 检查 Bun 环境、安装依赖、验证 Server、写入 ~/.cursor/mcp.json"
+  echo "  global  -> Bun 环境、依赖、MCP Server、全局 Hooks、全局 Cursor Rule"
   echo "  project -> 在目标项目下创建 .cursor/rules/memory-auto.md（AI 自动记忆行为指令）"
   echo ""
   echo -e "${BOLD}安装完成后重启 Cursor 即可使用。${NC}"
@@ -51,7 +51,7 @@ install_global() {
 
   # --- 1. 检查 Bun ---
   echo ""
-  echo "[1/4] 检查 Bun 环境..."
+  echo "[1/6] 检查 Bun 环境..."
   if ! command -v bun &>/dev/null; then
     warn "未检测到 Bun，正在安装..."
     curl -fsSL https://bun.sh/install | bash
@@ -65,14 +65,14 @@ install_global() {
 
   # --- 2. 安装依赖 ---
   echo ""
-  echo "[2/4] 安装项目依赖..."
+  echo "[2/6] 安装项目依赖..."
   cd "$SCRIPT_DIR"
   bun install --silent 2>/dev/null || bun install
   ok "依赖安装完成"
 
   # --- 3. 验证服务器 ---
   echo ""
-  echo "[3/4] 验证服务器启动..."
+  echo "[3/6] 验证服务器启动..."
   STARTUP_OUTPUT=$(echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' \
     | MEMORY_DIR=/tmp/.cursor-memory-test bun run src/index.ts 2>/dev/null | head -1)
 
@@ -85,7 +85,7 @@ install_global() {
 
   # --- 4. 配置 MCP ---
   echo ""
-  echo "[4/4] 配置 MCP Server..."
+  echo "[4/6] 配置 MCP Server..."
   mkdir -p "$(dirname "$MCP_CONFIG")"
 
   if [ -f "$MCP_CONFIG" ]; then
@@ -122,9 +122,47 @@ MCPEOF
     ok "已创建 MCP 配置"
   fi
 
+  # --- 5. 安装全局 Cursor Rule ---
+  echo ""
+  echo "[5/6] 安装全局 Cursor Rule..."
+  GLOBAL_RULES_DIR="$HOME/.cursor/rules"
+  mkdir -p "$GLOBAL_RULES_DIR"
+
+  if [ -f "$GLOBAL_RULES_DIR/memory-auto.md" ]; then
+    cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.md"
+    ok "Cursor Rule 已更新: $GLOBAL_RULES_DIR/memory-auto.md"
+  else
+    cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.md"
+    ok "Cursor Rule 已创建: $GLOBAL_RULES_DIR/memory-auto.md"
+  fi
+
+  # --- 6. 安装全局 Hooks ---
+  echo ""
+  echo "[6/6] 安装全局 Hooks..."
+  HOOKS_FILE="$HOME/.cursor/hooks.json"
+
+  if [ -f "$HOOKS_FILE" ]; then
+    if grep -q "session-start.ts" "$HOOKS_FILE"; then
+      warn "Hooks 配置中已存在 memory hooks，跳过"
+    else
+      warn "hooks.json 已存在: $HOOKS_FILE"
+      warn "请手动合并以下 hook 条目:"
+      echo ""
+      echo "  sessionStart: bun run $SCRIPT_DIR/src/hooks/session-start.ts"
+      echo "  stop:         bun run $SCRIPT_DIR/src/hooks/stop.ts"
+      echo ""
+    fi
+  else
+    sed "s|/path/to/cursor-memory-server|$SCRIPT_DIR|g" \
+      "$SCRIPT_DIR/hooks.json" > "$HOOKS_FILE"
+    ok "Hooks 已安装: $HOOKS_FILE"
+  fi
+
   echo ""
   echo -e "  ${GREEN}全局安装完成${NC}"
   echo "  MCP 配置: $MCP_CONFIG"
+  echo "  Cursor Rule: $GLOBAL_RULES_DIR/memory-auto.md"
+  echo "  Hooks: $HOOKS_FILE"
   echo "  数据存储: $MEMORY_DIR"
 }
 
@@ -173,8 +211,8 @@ case "$COMMAND" in
     install_global
     echo ""
     echo -e "${BOLD}下一步:${NC}"
-    echo "  1. 为需要记忆功能的项目运行: bash install.sh project /path/to/project"
-    echo "  2. 重启 Cursor IDE"
+    echo "  1. 重启 Cursor IDE"
+    echo "  2. （可选）为特定项目覆盖规则: bash install.sh project /path/to/project"
     echo ""
     ;;
 

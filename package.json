@@ -4,7 +4,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    "export": "bun run src/cli.ts export",
+    "import": "bun run src/cli.ts import"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1"

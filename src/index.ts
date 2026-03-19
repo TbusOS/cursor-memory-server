@@ -13,6 +13,8 @@ import {
   closeAll,
 } from "./store.js";
 import type { MemoryCategory, MemoryScope } from "./types.js";
+import { existsSync } from "fs";
+import { basename, dirname, join } from "path";
 
 const CATEGORY_VALUES = [
   "decision",
@@ -28,10 +30,28 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// P2-3: Enhanced project name detection — walk up to find project root
 function resolveProjectName(): string {
   if (process.env.PROJECT_NAME) return process.env.PROJECT_NAME;
-  const cwd = process.cwd();
-  const parts = cwd.split("/").filter(Boolean);
+
+  let dir = process.cwd();
+  const markers = [
+    ".git", "package.json", "Cargo.toml", "go.mod",
+    "pyproject.toml", ".svn", "pom.xml", "build.gradle",
+  ];
+
+  for (let i = 0; i < 10; i++) {
+    for (const marker of markers) {
+      if (existsSync(join(dir, marker))) {
+        return basename(dir) || "default";
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  const parts = process.cwd().split("/").filter(Boolean);
   return parts[parts.length - 1] || "default";
 }
 
@@ -42,10 +62,12 @@ function getTargetDb(scope: MemoryScope) {
   return [globalDb(), projectDb(projectName)];
 }
 
-function formatMemory(m: any, scope?: string): string {
+// P3-1: formatMemory with optional context display
+function formatMemory(m: any, scope?: string, showContext: boolean = false): string {
   const tag = scope ? `[${scope}]` : "";
   const tags = m.tags ? ` tags:${m.tags}` : "";
-  return `${tag}[#${m.id}] (${m.category}, importance:${m.importance}${tags}) ${m.content} — ${m.updated_at}`;
+  const ctx = (showContext && m.context) ? ` [ctx: ${m.context}]` : "";
+  return `${tag}[#${m.id}] (${m.category}, importance:${m.importance}${tags}${ctx}) ${m.content} — ${m.updated_at}`;
 }
 
 // --- Tool: memory_add ---
@@ -73,6 +95,11 @@ server.tool(
       .enum(["auto", "manual"])
       .optional()
       .describe("Whether this was auto-detected or manually requested"),
+    context: z
+      .string()
+      .max(100)
+      .optional()
+      .describe("Brief context about when/why this memory was created, max 100 chars"),
   },
   async (args) => {
     const scope = args.scope || "project";
@@ -83,8 +110,16 @@ server.tool(
       (args.category as MemoryCategory) || "general",
       args.tags || null,
       args.importance || 5,
-      args.source || "auto"
+      args.source || "auto",
+      args.context || null
     );
+
+    if (memory.id === -1) {
+      return {
+        content: [{ type: "text" as const, text: "Memory skipped: content was entirely private." }],
+      };
+    }
+
     return {
       content: [
         {
@@ -125,16 +160,19 @@ server.tool(
         limit
       );
       for (const m of memories) {
-        results.push(formatMemory(m, scopeLabel));
+        results.push(formatMemory(m, scopeLabel, true));
       }
     }
+
+    // P0-2: Truncate to requested limit when scope="both"
+    const truncated = results.slice(0, limit);
 
     return {
       content: [
         {
           type: "text" as const,
-          text: results.length > 0
-            ? `Found ${results.length} memories:\n\n${results.join("\n")}`
+          text: truncated.length > 0
+            ? `Found ${truncated.length} memories:\n\n${truncated.join("\n")}`
             : "No memories found matching the query.",
         },
       ],
@@ -173,12 +211,15 @@ server.tool(
       }
     }
 
+    // P0-2: Truncate to requested limit when scope="both"
+    const truncated = results.slice(0, limit);
+
     return {
       content: [
         {
           type: "text" as const,
-          text: results.length > 0
-            ? `${results.length} memories:\n\n${results.join("\n")}`
+          text: truncated.length > 0
+            ? `${truncated.length} memories:\n\n${truncated.join("\n")}`
             : "No memories stored yet.",
         },
       ],
@@ -217,13 +258,18 @@ server.tool(
 // --- Tool: memory_update ---
 server.tool(
   "memory_update",
-  "Update an existing memory's content, category, tags, or importance.",
+  "Update an existing memory's content, category, tags, importance, or context.",
   {
     id: z.number().describe("Memory ID to update"),
     content: z.string().optional().describe("New content"),
     category: z.enum(CATEGORY_VALUES).optional().describe("New category"),
     tags: z.string().optional().describe("New tags (comma-separated)"),
     importance: z.number().min(1).max(10).optional().describe("New importance level"),
+    context: z
+      .string()
+      .max(100)
+      .optional()
+      .describe("New context about when/why this memory exists, max 100 chars"),
     scope: z
       .enum(["global", "project"])
       .optional()
@@ -239,13 +285,14 @@ server.tool(
         args.content,
         args.category as MemoryCategory | undefined,
         args.tags,
-        args.importance
+        args.importance,
+        args.context
       );
       return {
         content: [
           {
             type: "text" as const,
-            text: `Memory updated: ${formatMemory(memory, scope)}`,
+            text: `Memory updated: ${formatMemory(memory, scope, true)}`,
           },
         ],
       };

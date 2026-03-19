@@ -30,7 +30,7 @@ bash install.sh all <path>     # 一键安装（MCP + Hooks + Rules）
 ## 文件结构
 
 - `src/index.ts` — MCP Server 入口，注册 6 个工具
-- `src/store.ts` — SQLite 存储层（连接池、FTS5、去重、搜索）
+- `src/store.ts` — SQLite 存储层（连接池、FTS5、去重、搜索、迁移、自动清理、隐私过滤）
 - `src/types.ts` — TypeScript 类型定义
 - `src/hooks/session-start.ts` — sessionStart hook：动态记忆注入
 - `src/hooks/stop.ts` — stop hook：提醒 AI 保存
@@ -99,22 +99,41 @@ bash install.sh all <path>     # 一键安装（MCP + Hooks + Rules）
 
 **原因**：SQLite FTS5 默认 tokenizer 不支持中文分词。引入外部分词库会破坏"零依赖"原则。在记忆量级（< 10,000 条）下 LIKE 性能足够。
 
-### 8. contentOverlap 去重必须用 extractKeywords
+### 8. contentOverlap 去重用 extractKeywords
 
-**已知 Bug（P0-1）**：当前 `contentOverlap` 用 `split(/\s+/)` 分词，中文整句被当作一个 token，去重完全失效。修复方案：复用 `extractKeywords` 函数（含 bigram 分词）。这是最高优先级修复。
+**决策**：`contentOverlap` 复用 `extractKeywords` 函数（含 bigram 分词），而非 `split(/\s+/)`。
 
-## 开发路线图
+**原因**：`split(/\s+/)` 无法处理中文——整句被当作一个 token，去重完全失效。`extractKeywords` 已实现 CJK bigram 分词，直接复用。
 
-详见 `docs/improvement-plan.md`，按优先级排列：
+### 9. 数据库迁移机制
+
+**决策**：`schema_version` 表 + 顺序迁移数组，在 `getDb` 打开数据库时自动执行。
+
+**原因**：表结构演进（如新增 `context`、`archived` 字段）需要平滑升级路径。迁移在数据库打开时自动执行，无需手动运维。
+
+## 已完成功能
+
+详见 `docs/improvement-plan.md` 的设计文档。所有功能已实现：
 
 ```
-Phase 1 - Bug 修复（P0-1 中文去重、P0-2 limit 语义）
-Phase 2 - 核心功能（P1-1 CLI 导出导入、P1-2 隐私、P1-3 Hooks 自动记忆）★
-Phase 3 - 可维护性（P2-1 数据库迁移、P2-2 自动清理、P2-3 项目名检测）
-Phase 4 - 增强功能（P3-1 记忆上下文字段、P3-2 全局一键安装）
-```
+Phase 1 - Bug 修复
+├── P0-1: ✅ 中文去重修复（contentOverlap 使用 extractKeywords）
+└── P0-2: ✅ scope="both" limit 语义修复（合并后截断）
 
-**P1-3 Hooks 自动记忆是核心改动**，需要新增 `src/hooks/session-start.ts` 和 `src/hooks/stop.ts` 两个文件，以及配套的 `hooks.json` 和更新 `cursor-rule-template.md`。
+Phase 2 - 核心功能
+├── P1-1: ✅ CLI 导出/导入（src/cli.ts）
+├── P1-2: ✅ 隐私双层防御（stripPrivateTags + Cursor Rule）
+└── P1-3: ✅ Hooks 自动记忆（session-start.ts + stop.ts）
+
+Phase 3 - 可维护性
+├── P2-1: ✅ 数据库迁移机制（schema_version 表）
+├── P2-2: ✅ 记忆自动清理（getDb 时执行）
+└── P2-3: ✅ 项目名检测增强（向上查找 .git 等标志）
+
+Phase 4 - 增强功能
+├── P3-1: ✅ 记忆关联上下文字段（context 列，搜索时展示）
+└── P3-2: ✅ 全局一键安装（install.sh global 安装 MCP + Hooks + Rules）
+```
 
 ## 与 claude-mem 的对比
 

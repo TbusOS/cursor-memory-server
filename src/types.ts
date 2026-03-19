@@ -19,6 +19,8 @@ export interface Memory {
   created_at: string;
   updated_at: string;
   access_count: number;
+  context: string | null;
+  archived: number;
 }
 
 export interface AddMemoryInput {
@@ -27,6 +29,7 @@ export interface AddMemoryInput {
   tags?: string;
   importance?: number;
   scope?: MemoryScope;
+  context?: string;
 }
 
 export interface SearchMemoryInput {
@@ -49,6 +52,7 @@ export interface UpdateMemoryInput {
   tags?: string;
   importance?: number;
   scope?: MemoryScope;
+  context?: string;
 }
 
 export interface DeleteMemoryInput {

@@ -37,7 +37,6 @@ function initDb(db: Database) {
         content=memories, content_rowid=id
       );
 
-      -- Triggers to keep FTS in sync
       CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
         INSERT INTO memories_fts(rowid, content, category, tags)
         VALUES (new.id, new.content, new.category, new.tags);
@@ -58,6 +57,67 @@ function initDb(db: Database) {
   }
 }
 
+// --- P2-1: Database migration mechanism ---
+
+const MIGRATIONS: { version: number; sql: string; description: string }[] = [
+  { version: 1, sql: "", description: "initial schema (created by initDb)" },
+  {
+    version: 2,
+    sql: "ALTER TABLE memories ADD COLUMN context TEXT DEFAULT NULL;",
+    description: "add context field",
+  },
+  {
+    version: 3,
+    sql: "ALTER TABLE memories ADD COLUMN archived INTEGER DEFAULT 0;",
+    description: "add archived field",
+  },
+];
+
+function runMigrations(db: Database) {
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TEXT DEFAULT (datetime('now')),
+    description TEXT
+  )`);
+
+  const row = db.query("SELECT MAX(version) as v FROM schema_version").get() as { v: number | null } | null;
+  const currentVersion = row?.v ?? 0;
+
+  for (const m of MIGRATIONS) {
+    if (m.version > currentVersion) {
+      if (m.sql) {
+        try {
+          db.exec(m.sql);
+        } catch (e: any) {
+          if (!e.message?.includes("duplicate column")) throw e;
+        }
+      }
+      db.query("INSERT INTO schema_version (version, description) VALUES (?, ?)")
+        .run(m.version, m.description);
+    }
+  }
+}
+
+// --- P2-2: Auto cleanup of stale memories ---
+
+function autoCleanup(db: Database) {
+  try {
+    const result = db.query(`
+      DELETE FROM memories
+      WHERE (importance <= 2 AND updated_at < datetime('now', '-90 days') AND access_count <= 1)
+         OR (importance <= 4 AND updated_at < datetime('now', '-180 days') AND access_count <= 1)
+    `).run();
+
+    if (result.changes > 0) {
+      process.stderr.write(`Auto-cleaned ${result.changes} stale memories\n`);
+    }
+  } catch {
+    // Silent fail - cleanup is best-effort
+  }
+}
+
+// --- Database connection pool ---
+
 const dbCache = new Map<string, Database>();
 
 function getDb(path: string): Database {
@@ -66,6 +126,8 @@ function getDb(path: string): Database {
     db = new Database(path);
     db.exec("PRAGMA journal_mode=WAL");
     initDb(db);
+    runMigrations(db);
+    autoCleanup(db);
     dbCache.set(path, db);
   }
   return db;
@@ -82,30 +144,55 @@ export function projectDb(projectName: string): Database {
   return getDb(join(PROJECTS_DIR, `${safeName}.db`));
 }
 
+// --- P1-2: Privacy - strip private tags ---
+
+function stripPrivateTags(content: string): string {
+  return content.replace(/<private>[\s\S]*?<\/private>/g, "").trim();
+}
+
+// --- Memory CRUD ---
+
 export function addMemory(
   db: Database,
   content: string,
   category: MemoryCategory = "general",
   tags: string | null = null,
   importance: number = 5,
-  source: MemorySource = "auto"
+  source: MemorySource = "auto",
+  context: string | null = null
 ): Memory {
-  const existing = searchMemories(db, content, undefined, 1);
+  const cleaned = stripPrivateTags(content);
+  if (!cleaned) {
+    return {
+      id: -1,
+      content: "[skipped: private]",
+      category,
+      tags,
+      importance,
+      source,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      access_count: 0,
+      context: null,
+      archived: 0,
+    };
+  }
+
+  const existing = searchMemories(db, cleaned, undefined, 1);
   if (existing.length > 0) {
-    const similarity = contentOverlap(existing[0].content, content);
+    const similarity = contentOverlap(existing[0].content, cleaned);
     if (similarity > 0.8) {
-      return updateMemory(db, existing[0].id, content, category, tags, importance);
+      return updateMemory(db, existing[0].id, cleaned, category, tags, importance, context);
     }
   }
 
   const stmt = db.prepare(`
-    INSERT INTO memories (content, category, tags, importance, source)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO memories (content, category, tags, importance, source, context)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(content, category, tags, importance, source);
+  stmt.run(cleaned, category, tags, importance, source, context);
   const row = db.query("SELECT last_insert_rowid() as id").get() as { id: number };
-  const id = row.id;
-  return db.query("SELECT * FROM memories WHERE id = ?").get(id) as Memory;
+  return db.query("SELECT * FROM memories WHERE id = ?").get(row.id) as Memory;
 }
 
 export function searchMemories(
@@ -235,7 +322,8 @@ export function updateMemory(
   content?: string,
   category?: MemoryCategory,
   tags?: string | null,
-  importance?: number
+  importance?: number,
+  context?: string | null
 ): Memory {
   const current = db.query("SELECT * FROM memories WHERE id = ?").get(id) as Memory | null;
   if (!current) throw new Error(`Memory with id ${id} not found`);
@@ -246,6 +334,7 @@ export function updateMemory(
       category = ?,
       tags = ?,
       importance = ?,
+      context = ?,
       updated_at = datetime('now')
     WHERE id = ?
   `).run(
@@ -253,6 +342,7 @@ export function updateMemory(
     category ?? current.category,
     tags !== undefined ? tags : current.tags,
     importance ?? current.importance,
+    context !== undefined ? context : current.context,
     id
   );
 
@@ -308,9 +398,12 @@ function recencyWeight(dateStr: string): number {
   return 1 / (1 + daysAgo * 0.1);
 }
 
+// P0-1: Fixed — use extractKeywords instead of split(/\s+/) for CJK support
 function contentOverlap(a: string, b: string): number {
-  const setA = new Set(a.split(/\s+/));
-  const setB = new Set(b.split(/\s+/));
+  const setA = new Set(extractKeywords(a));
+  const setB = new Set(extractKeywords(b));
+  if (setA.size === 0 && setB.size === 0) return 1;
+  if (setA.size === 0 || setB.size === 0) return 0;
   let overlap = 0;
   for (const w of setA) if (setB.has(w)) overlap++;
   return (2 * overlap) / (setA.size + setB.size);
