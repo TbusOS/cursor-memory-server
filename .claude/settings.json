@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun install)",
+      "Bash(bun run src/index.ts)",
+      "Bash(bun run src/cli.ts *)",
+      "Bash(bun test *)",
+      "Bash(bash install.sh *)"
+    ]
+  }
+}
