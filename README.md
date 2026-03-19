@@ -2,45 +2,64 @@
 
 [中文文档](README_zh.md)
 
-A persistent memory system for Cursor IDE based on MCP (Model Context Protocol). It enables AI to retain context across conversations and sessions — delivering a Claude Memory-like experience right inside Cursor.
+A persistent memory system for Cursor IDE based on **Hooks + MCP** hybrid architecture. It enables AI to retain context across conversations and sessions — delivering a Claude Memory-like experience right inside Cursor.
 
 ## Key Features
 
-- **Cross-conversation persistence** — Restart Cursor, open a new chat, and AI automatically recalls prior context
+- **Auto-recall via Hooks** — Memories are automatically injected at session start, no manual tool calls needed
+- **Auto-save prompting** — Stop hook reminds AI to save key takeaways before session ends
+- **Dynamic injection** — Small projects get full memory injection; large projects get top-N with MCP search fallback
 - **Dual-layer memory** — Global memories (shared across all projects) + Project memories (isolated per project)
 - **Hybrid save modes** — AI auto-detects important info + user manual control ("remember this" / "forget this")
 - **Bilingual search** — FTS5 full-text search for English + bigram LIKE fallback for Chinese (CJK)
 - **Auto-deduplication** — When a new memory overlaps > 80% with an existing one, it merges instead of duplicating
 - **Weighted recall** — Memories ranked by `importance × recencyWeight`, prioritizing important and fresh entries
+- **Privacy protection** — Cursor Rule prevents saving credentials; `<private>` tags for manual exclusion
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Cursor IDE                         │
-│                                                         │
-│  ┌───────────┐    stdio      ┌────────────────────────┐ │
-│  │  AI Chat   │◄────────────►│  MCP Memory Server     │ │
-│  │  (Agent)   │  JSON-RPC    │  (Bun + TypeScript)    │ │
-│  └───────────┘               └──────────┬─────────────┘ │
-│       ▲                                 │               │
-│       │                        ┌────────┴────────┐      │
-│  .cursor/rules/                │                 │      │
-│  memory-auto.md          ┌─────┴─────┐    ┌──────┴────┐ │
-│  (behavior rules)        │ global.db  │    │ project/  │ │
-│                          │ (global)   │    │  *.db     │ │
-│                          └───────────┘    │ (per-proj) │ │
-│                                           └───────────┘ │
-│                          ~/.cursor/memory/               │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        Cursor IDE                             │
+│                                                               │
+│  Hooks (.cursor/hooks.json)                                   │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │ sessionStart → session-start.ts → read SQLite            │ │
+│  │               ├─ ≤50 memories: inject ALL into context   │ │
+│  │               └─ >50 memories: inject top-20 + hint      │ │
+│  │                                                          │ │
+│  │ stop → stop.ts → "save key memories using memory_add"    │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                               │
+│  ┌───────────┐    stdio      ┌────────────────────────────┐   │
+│  │  AI Chat   │◄────────────►│  MCP Memory Server         │   │
+│  │  (Agent)   │  JSON-RPC    │  (Bun + TypeScript)        │   │
+│  └───────────┘               └──────────┬─────────────────┘   │
+│       ▲                                 │                     │
+│       │                        ┌────────┴────────┐            │
+│  .cursor/rules/                │                 │            │
+│  memory-auto.md          ┌─────┴─────┐    ┌──────┴────┐      │
+│  (behavior rules)        │ global.db  │    │ project/  │      │
+│                          │ (global)   │    │  *.db     │      │
+│                          └───────────┘    │ (per-proj) │      │
+│                                           └───────────┘      │
+│                          ~/.cursor/memory/                     │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Cursor launches the Memory Server as a child process via MCP. The AI communicates with it over stdio using JSON-RPC 2.0. A Cursor Rule file (`.cursor/rules/memory-auto.md`) injects behavior instructions into every conversation, telling the AI when and how to save/recall memories.
+**Three mechanisms work together:**
+
+1. **Hooks** (automatic) — `sessionStart` injects recalled memories into AI context; `stop` prompts AI to save session takeaways
+2. **MCP Tools** (on-demand) — AI calls `memory_add`, `memory_search`, `memory_delete` as needed during conversation
+3. **Cursor Rules** (guidance) — Tells AI when to save, what to skip, privacy rules, importance scoring
+
+The system dynamically adapts: small projects get full memory injection with no MCP overhead, while large projects automatically fall back to partial injection with MCP-powered search.
 
 ## Documentation
 
 - [Usage Guide (EN)](docs/usage-guide_en.md) — Installation, configuration, usage, troubleshooting
 - [Architecture & Design (EN)](docs/architecture_en.md) — System design, database schema, search engine, recall algorithm
+- [Improvement Plan](docs/improvement-plan.md) — Roadmap and planned enhancements
 - [使用说明 (中文)](docs/usage-guide.md)
 - [技术实现原理 (中文)](docs/architecture_zh.md)
 
@@ -49,15 +68,21 @@ Cursor launches the Memory Server as a child process via MCP. The AI communicate
 ```
 cursor-memory-server/
 ├── src/
-│   ├── index.ts       # MCP server entry — registers 6 tools
-│   ├── store.ts       # SQLite storage layer (FTS5 + LIKE dual search)
-│   └── types.ts       # TypeScript type definitions
+│   ├── index.ts              # MCP server entry — registers 6 tools
+│   ├── store.ts              # SQLite storage layer (FTS5 + LIKE dual search)
+│   ├── types.ts              # TypeScript type definitions
+│   ├── cli.ts                # CLI commands (export/import)
+│   └── hooks/
+│       ├── session-start.ts  # sessionStart hook: dynamic memory injection
+│       └── stop.ts           # stop hook: prompt AI to save memories
 ├── docs/
 │   ├── usage-guide.md          # Usage guide (Chinese)
 │   ├── usage-guide_en.md       # Usage guide (English)
 │   ├── architecture_zh.md      # Technical design (Chinese)
-│   └── architecture_en.md      # Technical design (English)
-├── cursor-rule-template.md     # Cursor Rule template for projects
+│   ├── architecture_en.md      # Technical design (English)
+│   └── improvement-plan.md     # Roadmap
+├── hooks.json                  # Cursor hooks configuration template
+├── cursor-rule-template.md     # Cursor Rule template
 ├── install.sh                  # One-click install script
 ├── package.json
 ├── tsconfig.json
@@ -69,7 +94,7 @@ cursor-memory-server/
 ### Prerequisites
 
 - [Bun](https://bun.sh) >= 1.0.0 (runtime with built-in SQLite & TypeScript support)
-- [Cursor IDE](https://cursor.com)
+- [Cursor IDE](https://cursor.com) >= 1.7 (hooks support required)
 
 ### Install
 
@@ -78,15 +103,15 @@ cursor-memory-server/
 git clone https://github.com/TbusOS/cursor-memory-server.git
 cd cursor-memory-server
 
-# One-click install: MCP server + project memory rules
+# One-click install: MCP server + hooks + rules
 bash install.sh all /path/to/your-project
 
 # Or install step by step:
-bash install.sh global                        # Install MCP server globally
+bash install.sh global                        # Install MCP server + hooks globally
 bash install.sh project /path/to/your-project # Enable memory for a specific project
 ```
 
-Restart Cursor after installation. That's it — start chatting and the AI will automatically recall and save memories.
+Restart Cursor after installation. That's it — memories are automatically recalled and saved across sessions.
 
 ### Manual Installation
 
@@ -100,7 +125,7 @@ bun install
 bun run src/index.ts
 # Should print: "cursor-memory MCP server running on stdio"
 
-# 3. Add to ~/.cursor/mcp.json
+# 3. Add MCP server to ~/.cursor/mcp.json
 ```
 
 ```json
@@ -118,16 +143,20 @@ bun run src/index.ts
 ```
 
 ```bash
-# 4. Copy the Cursor Rule to your project
+# 4. Install hooks (replace /absolute/path/to/ with your actual path)
+# Copy hooks.json to ~/.cursor/hooks.json (global) or .cursor/hooks.json (project)
+# Edit the paths in hooks.json to point to your installation
+
+# 5. Copy the Cursor Rule to your project
 mkdir -p /path/to/your-project/.cursor/rules
 cp cursor-rule-template.md /path/to/your-project/.cursor/rules/memory-auto.md
 
-# 5. Restart Cursor
+# 6. Restart Cursor
 ```
 
 ## MCP Tools
 
-The server exposes 6 MCP tools:
+The server exposes 6 MCP tools. With hooks installed, `memory_get_context` is called automatically — you typically only need `memory_add`, `memory_search`, and `memory_delete`.
 
 | Tool | Type | Description |
 |------|------|-------------|
@@ -136,17 +165,25 @@ The server exposes 6 MCP tools:
 | `memory_list` | Read | Browse memories sorted by importance & recency |
 | `memory_update` | Write | Partially update an existing memory |
 | `memory_delete` | Write | Delete a memory by ID |
-| `memory_get_context` | Read | Recall top-N memories for current context (called at conversation start) |
+| `memory_get_context` | Read | Recall top-N memories (auto-handled by hooks if installed) |
 
 ## Usage
 
-### Automatic Mode (Zero Configuration)
+### With Hooks (Recommended)
 
-Once installed, everything works automatically:
+Once hooks are installed, everything is automatic:
+
+1. **Session start**: `sessionStart` hook injects recalled memories into AI context — no manual calls needed
+2. **During conversation**: AI detects and saves important decisions, preferences, architecture choices, progress, and bugs
+3. **Session end**: `stop` hook prompts AI to review and save key takeaways
+4. **Across restarts**: Memories persist in SQLite — nothing is lost
+
+### Without Hooks (Fallback)
+
+If hooks are not installed (Cursor < 1.7), the system falls back to the MCP-only mode:
 
 1. **Every new conversation**: AI calls `memory_get_context` to recall relevant memories
-2. **During conversation**: AI detects and saves important decisions, preferences, architecture choices, progress, and bugs
-3. **Across restarts**: Memories persist in SQLite — nothing is lost
+2. **During conversation**: AI saves memories via `memory_add`
 
 ### Manual Control
 
@@ -158,6 +195,16 @@ You can also explicitly instruct the AI:
 - **Delete**: "Forget this" / "忘掉这个" / "Delete memory #5"
 - **Update**: "Update memory #3 importance to 9"
 
+### Backup & Migration
+
+```bash
+# Export all memories to JSON
+bun run src/cli.ts export ./backup.json
+
+# Import from backup
+bun run src/cli.ts import ./backup.json
+```
+
 ## Tech Stack
 
 | Component | Choice | Rationale |
@@ -165,6 +212,7 @@ You can also explicitly instruct the AI:
 | Runtime | **Bun** | Native TypeScript execution, built-in `bun:sqlite`, cold start < 100ms |
 | Storage | **SQLite + FTS5** | Embedded, zero-ops, single-file DB, WAL mode, built-in full-text search |
 | Protocol | **MCP over stdio** | Native Cursor support, lifecycle managed by IDE, no network ports needed |
+| Hooks | **Cursor Hooks (v1.7+)** | sessionStart for auto-recall, stop for auto-save prompting |
 | Validation | **Zod** | Bundled with MCP SDK, auto JSON Schema generation |
 
 ## Data Storage
@@ -190,6 +238,7 @@ sqlite3 ~/.cursor/memory/global.db "SELECT id, category, importance, substr(cont
 |----------|---------|-------------|
 | `MEMORY_DIR` | `~/.cursor/memory` | Directory for database files |
 | `PROJECT_NAME` | Auto-detected from cwd | Override project name for database isolation |
+| `MEMORY_THRESHOLD` | `50` | Memory count threshold for full vs. partial injection |
 
 ## License
 

@@ -4,41 +4,79 @@ This document covers the internal architecture, database design, search engine, 
 
 ## System Architecture
 
+The system uses three complementary mechanisms: **Hooks** for automatic lifecycle events, **MCP** for on-demand AI tool calls, and **Rules** for behavior guidance. A dynamic injection strategy means small projects get full memory injection with no MCP overhead, while large projects automatically fall back to partial injection with MCP-powered search.
+
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Cursor IDE                         │
-│                                                         │
-│  ┌───────────┐    stdio      ┌────────────────────────┐ │
-│  │  AI Chat   │◄────────────►│  MCP Memory Server     │ │
-│  │  (Agent)   │  JSON-RPC    │  (Bun + TypeScript)    │ │
-│  └───────────┘               └──────────┬─────────────┘ │
-│       ▲                                 │               │
-│       │                        ┌────────┴────────┐      │
-│  .cursor/rules/                │                 │      │
-│  memory-auto.md          ┌─────┴─────┐    ┌──────┴────┐ │
-│  (behavior rules)        │ global.db  │    │ project/  │ │
-│                          │ (global)   │    │  *.db     │ │
-│                          └───────────┘    │ (per-proj) │ │
-│                                           └───────────┘ │
-│                          ~/.cursor/memory/               │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        Cursor IDE                             │
+│                                                               │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │ Hooks (.cursor/hooks.json)                               │ │
+│  │                                                          │ │
+│  │ sessionStart ──→ session-start.ts ──→ SQLite (readonly)  │ │
+│  │                  ├─ count ≤ 50: full injection            │ │
+│  │                  └─ count > 50: top-N + "use MCP search" │ │
+│  │                                                          │ │
+│  │ stop ──→ stop.ts ──→ followup_message                    │ │
+│  │          "save key memories using memory_add"             │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                                                               │
+│  ┌───────────┐    stdio      ┌────────────────────────────┐   │
+│  │  AI Chat   │◄────────────►│  MCP Memory Server         │   │
+│  │  (Agent)   │  JSON-RPC    │  (Bun + TypeScript)        │   │
+│  └───────────┘               └──────────┬─────────────────┘   │
+│       ▲                                 │                     │
+│       │                        ┌────────┴────────┐            │
+│  .cursor/rules/                │                 │            │
+│  memory-auto.md          ┌─────┴─────┐    ┌──────┴────┐      │
+│  (behavior rules)        │ global.db  │    │ project/  │      │
+│                          │ (global)   │    │  *.db     │      │
+│                          └───────────┘    │ (per-proj) │      │
+│                                           └───────────┘      │
+│                          ~/.cursor/memory/                     │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+### Three Mechanisms
+
+| Mechanism | Trigger | Role |
+|-----------|---------|------|
+| **Hooks** | Automatic (lifecycle events) | sessionStart: inject memories; stop: prompt AI to save |
+| **MCP Tools** | AI actively calls | On-demand add/search/delete (essential for large memory sets) |
+| **Rules** | Automatic (every conversation) | Guide AI behavior: when to save, what to skip, privacy rules |
 
 ### Communication Pipeline
 
-1. On startup, Cursor reads `~/.cursor/mcp.json` and launches the Memory Server as a child process
-2. The AI Agent communicates with the server via **stdio** using **JSON-RPC 2.0**
-3. `.cursor/rules/memory-auto.md` is injected as a Cursor Rule into every conversation's system prompt, instructing the AI when and how to use memory tools
+1. **Session start**: Cursor fires `sessionStart` hook → `session-start.ts` reads SQLite directly → injects memories as `additional_context` into the AI's context window
+2. **During conversation**: AI uses MCP tools (`memory_add`, `memory_search`) as needed, communicating via stdio/JSON-RPC 2.0
+3. **Session end**: Cursor fires `stop` hook → `stop.ts` returns a `followup_message` → AI reviews the session, decides what to save, calls `memory_add`
+4. `.cursor/rules/memory-auto.md` is injected as a Cursor Rule into every conversation, instructing AI on behavior across all three mechanisms
+
+### Dynamic Injection Strategy
+
+The `sessionStart` hook checks the total memory count and decides how much to inject:
+
+| Memory Count | Injection Mode | MCP Usage |
+|-------------|----------------|-----------|
+| 0 | Hint only ("no memories yet") | Not needed |
+| 1–50 | **Full injection** (all memories in context) | Available but rarely used |
+| 51+ | **Partial injection** (top 20 by importance × recency) | AI uses `memory_search` for deeper queries |
+
+The threshold (default: 50) is configurable via the `MEMORY_THRESHOLD` environment variable. The transition is seamless — there is no mode switch, just a gradient from "everything in context" to "highlights + search".
 
 ### Component Responsibilities
 
 | Component | File | Role |
 |-----------|------|------|
+| Session Start Hook | `src/hooks/session-start.ts` | Reads SQLite directly (readonly), dynamically injects memories as `additional_context` |
+| Stop Hook | `src/hooks/stop.ts` | Returns `followup_message` prompting AI to save session takeaways |
 | MCP Server | `src/index.ts` | Registers 6 MCP tools, receives JSON-RPC requests, validates params (Zod), routes to storage layer |
 | Storage Layer | `src/store.ts` | SQLite database management (connection pooling, WAL mode), FTS5 indexing, CRUD operations, search strategies, deduplication |
 | Type Definitions | `src/types.ts` | Memory, MemoryCategory, MemoryScope, MemorySource TypeScript types |
-| Behavior Rules | `.cursor/rules/memory-auto.md` | Guides AI on when to save/recall, how to categorize, importance scoring standards |
-| MCP Config | `~/.cursor/mcp.json` | Registers the Memory Server's startup command, arguments, and environment variables with Cursor |
+| Behavior Rules | `.cursor/rules/memory-auto.md` | Guides AI on when to save/recall, how to categorize, importance scoring, privacy rules |
+| Hook Config | `.cursor/hooks.json` | Registers hook scripts with Cursor's lifecycle system |
+| MCP Config | `~/.cursor/mcp.json` | Registers the MCP Memory Server with Cursor |
+| CLI Tools | `src/cli.ts` | Export/import commands for backup and migration |
 
 ---
 
@@ -272,13 +310,14 @@ All tool parameters use Zod schemas. The SDK automatically handles:
 
 `.cursor/rules/memory-auto.md` uses `alwaysApply: true` in its frontmatter to ensure injection into every conversation.
 
-The instructions organize AI memory behavior into three phases:
+The instructions organize AI memory behavior to work with the Hooks + MCP hybrid architecture:
 
-1. **Conversation initialization**: Automatically call `memory_get_context` to load context
-2. **During conversation**: Detect decisions/preferences/architecture/progress/bugs and auto-call `memory_add`
-3. **Conversation end / user commands**: Respond to "remember" / "forget" manual control instructions
+1. **Conversation initialization**: Memories are auto-injected by the `sessionStart` hook. The Rule tells AI to check the "Recalled Memories" header — if it says "full", all memories are loaded and no MCP calls are needed; if it says "top N of M", the AI should use `memory_search` for specific topics.
+2. **During conversation**: Detect decisions/preferences/architecture/progress/bugs and proactively call `memory_add`. Privacy rules prevent saving credentials or sensitive data.
+3. **Session end**: The `stop` hook prompts the AI to review the session and save takeaways. The Rule provides guidance on what's worth saving vs. what to skip.
+4. **Manual control**: Respond to "remember this" / "forget this" user commands.
 
-The rules also define scope selection logic (global vs project), importance scoring criteria (1-10 with scenario examples), and a category reference table, ensuring consistent and predictable memory-saving behavior.
+The rules also define scope selection logic (global vs project), importance scoring criteria (1-10 with scenario examples), a category reference table, and a fallback instruction for environments where hooks are not installed (call `memory_get_context` manually).
 
 ---
 
@@ -349,13 +388,33 @@ Compare: storing the same information in a Cursor Rules file would be ~15,000 to
 
 ### Overhead Breakdown
 
-MCP tool calls have a small token cost:
+With the Hooks + MCP hybrid architecture, token overhead is reduced compared to the pure MCP approach:
+
+**Small projects (≤ 50 memories, full injection mode):**
 
 | Source | Estimate |
 |--------|----------|
-| Tool description injection (JSON Schema for 6 tools) | ~800 tokens (first time only, Cursor caches) |
-| `memory_get_context` call + response | ~1,500 tokens |
-| `memory_add` call + response (per save) | ~100 tokens |
-| `.cursor/rules/memory-auto.md` injection | ~400 tokens |
+| Hook-injected `additional_context` (all memories) | ~2,500 tokens |
+| `.cursor/rules/memory-auto.md` injection | ~500 tokens |
+| Tool descriptions (MCP tools registered but unused) | ~800 tokens |
+| `memory_add` at session end (stop hook followup) | ~200 tokens |
+| **Total** | **~4,000 tokens** |
 
-Total per-conversation memory system overhead: ~**2,800 tokens**. For reference, a typical conversation consumes 10,000–50,000 tokens total, making the memory system ~**5–25%** of the budget — in exchange for complete cross-conversation context retention.
+Note: No `memory_get_context` call needed — the hook handles injection directly, saving one round-trip.
+
+**Large projects (> 50 memories, partial injection mode):**
+
+| Source | Estimate |
+|--------|----------|
+| Hook-injected `additional_context` (top 20) | ~1,000 tokens |
+| `.cursor/rules/memory-auto.md` injection | ~500 tokens |
+| Tool descriptions (MCP tools) | ~800 tokens |
+| `memory_search` calls during conversation (0-3 calls) | ~300-900 tokens |
+| `memory_add` at session end (stop hook followup) | ~200 tokens |
+| **Total** | **~2,800–3,400 tokens** |
+
+For reference, a typical conversation consumes 10,000–50,000 tokens total, making the memory system ~**5–25%** of the budget — in exchange for complete cross-conversation context retention.
+
+**Comparison with pure MCP approach (no hooks):**
+
+The previous design required AI to manually call `memory_get_context` (~1,500 tokens round-trip) and relied on AI remembering to save memories. The hooks approach eliminates the recall tool call (saving ~1,500 tokens per conversation) while making saves more reliable via the stop hook followup.

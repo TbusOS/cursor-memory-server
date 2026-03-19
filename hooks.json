@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "bun run /path/to/cursor-memory-server/src/hooks/session-start.ts",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "bun run /path/to/cursor-memory-server/src/hooks/stop.ts",
+        "timeout": 3,
+        "loop_limit": 1
+      }
+    ]
+  }
+}

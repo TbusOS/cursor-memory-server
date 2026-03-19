@@ -1,16 +1,20 @@
 ---
-description: Memory system instructions for automatic context recall and saving
+description: Memory system — auto-recall via hooks, manual save via MCP tools
 globs:
 alwaysApply: true
 ---
 
 # Memory System
 
-You have access to a persistent memory system via MCP tools (server: "memory"). Use it to maintain context across conversations.
+You have a persistent memory system. Memories are auto-loaded at session start via hooks and saved via MCP tools.
 
-## On Conversation Start
+## Context Recall (Automatic)
 
-Call `memory_get_context` at the beginning of every conversation to recall relevant memories. The `project_name` is automatically detected from the environment — you can omit it or pass the current project name.
+Memories appear in your context as "Recalled Memories" at session start.
+
+- If you see **"full"** in the header: all memories are loaded. Do NOT call memory_get_context or memory_search — everything is already here.
+- If you see **"top N of M"**: only high-priority memories are loaded. Use `memory_search` to find specific topics not shown.
+- If no "Recalled Memories" section appears: hooks may not be installed. Call `memory_get_context` manually at conversation start.
 
 ## When to Save Memories (Automatic)
 
@@ -33,9 +37,19 @@ When the user explicitly says any of the following, save with `source: "manual"`
 
 ## When to Delete/Update Memories
 
-- "忘掉这个" / "forget this" / "删除记忆" → call `memory_delete`
+- "忘掉这个" / "forget this" / "删除记忆" → call `memory_delete` with the ID shown in brackets [#N]
 - "更新记忆" / "update memory" → call `memory_update`
 - When a decision is reversed or superseded, update the old memory rather than creating a duplicate
+
+## Privacy
+
+### Do NOT save
+- Passwords, API Key, Token, Secret, private keys, certificates
+- Database connection strings containing credentials
+- Personal identity information (ID numbers, bank accounts, phone numbers)
+
+When encountering such information, only record the fact, not the credential itself.
+Example: "Project uses AWS S3 for static assets" — NOT "AWS_SECRET_KEY=AKIA..."
 
 ## Scope Guidelines
 
