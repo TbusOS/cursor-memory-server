@@ -4,8 +4,20 @@
       "Bash(bun install)",
       "Bash(bun run src/index.ts)",
       "Bash(bun run src/cli.ts *)",
+      "Bash(bun run src/hooks/*)",
       "Bash(bun test *)",
-      "Bash(bash install.sh *)"
+      "Bash(bash install.sh *)",
+      "Bash(sqlite3 *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)"
     ]
+  },
+  "env": {
+    "MEMORY_DIR": "~/.cursor/memory"
   }
 }
