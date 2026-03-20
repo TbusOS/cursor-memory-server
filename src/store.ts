@@ -138,16 +138,36 @@ export function globalDb(): Database {
   return getDb(join(MEMORY_DIR, "global.db"));
 }
 
-export function projectDb(projectName: string): Database {
+export function projectDb(projectRoot: string): Database {
   ensureDirs();
-  const safeName = projectName.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return getDb(join(PROJECTS_DIR, `${safeName}.db`));
+  // Convert "/home/zhangbh/my-app" → "-home-zhangbh-my-app" (Claude Code style)
+  const dirName = projectRoot.replace(/^\//, "").replace(/\//g, "-");
+  const projDir = join(PROJECTS_DIR, dirName);
+  if (!existsSync(projDir)) mkdirSync(projDir, { recursive: true });
+  return getDb(join(projDir, "memory.db"));
+}
+
+export function sharedDb(projectRoot: string): Database {
+  const sharedDir = join(projectRoot, ".cursor", "memory");
+  if (!existsSync(sharedDir)) mkdirSync(sharedDir, { recursive: true });
+  return getDb(join(sharedDir, "shared.db"));
 }
 
 // --- P1-2: Privacy - strip private tags ---
 
 function stripPrivateTags(content: string): string {
   return content.replace(/<private>[\s\S]*?<\/private>/g, "").trim();
+}
+
+// --- Content length limit ---
+const MAX_MEMORY_LENGTH = parseInt(process.env.MAX_MEMORY_LENGTH || "500");
+
+function truncateContent(content: string): string {
+  if (content.length <= MAX_MEMORY_LENGTH) return content;
+  // Cut at last sentence boundary within limit, or hard cut
+  const truncated = content.slice(0, MAX_MEMORY_LENGTH);
+  const lastSentence = truncated.match(/.*[。.!！?？\n]/s);
+  return (lastSentence?.[0] || truncated).trim() + "…";
 }
 
 // --- Memory CRUD ---
@@ -161,7 +181,7 @@ export function addMemory(
   source: MemorySource = "auto",
   context: string | null = null
 ): Memory {
-  const cleaned = stripPrivateTags(content);
+  const cleaned = truncateContent(stripPrivateTags(content));
   if (!cleaned) {
     return {
       id: -1,
@@ -355,11 +375,11 @@ export function deleteMemory(db: Database, id: number): boolean {
 }
 
 export function getContext(
-  projectName: string,
+  projectRoot: string,
   limit: number = 30
 ): Memory[] {
   const gDb = globalDb();
-  const pDb = projectDb(projectName);
+  const pDb = projectDb(projectRoot);
 
   const globalMemories = gDb.query(`
     SELECT *, 'global' as scope FROM memories

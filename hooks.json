@@ -7,6 +7,24 @@
         "timeout": 5
       }
     ],
+    "preToolUse": [
+      {
+        "command": "bun run /path/to/cursor-memory-server/src/hooks/pre-tool-use.ts",
+        "timeout": 3
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "bun run /path/to/cursor-memory-server/src/hooks/post-tool-use.ts",
+        "timeout": 3
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "bun run /path/to/cursor-memory-server/src/hooks/pre-compact.ts",
+        "timeout": 3
+      }
+    ],
     "stop": [
       {
         "command": "bun run /path/to/cursor-memory-server/src/hooks/stop.ts",

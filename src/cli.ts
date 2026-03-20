@@ -1,5 +1,6 @@
 import { globalDb, projectDb, addMemory, closeAll } from "./store.js";
-import { readFileSync, writeFileSync, readdirSync } from "fs";
+import { Database } from "bun:sqlite";
+import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "fs";
 import { join, basename } from "path";
 import type { Memory, MemoryCategory, MemorySource } from "./types.js";
 
@@ -24,8 +25,7 @@ function positionalArg(): string | undefined {
 
 switch (command) {
   case "export": {
-    const scopeFlag = hasFlag("--global") ? "global" : hasFlag("--project") ? "project" : "both";
-    const projectName = findFlag("--project");
+    const scopeFlag = hasFlag("--global") ? "global" : "both";
     const outputPath = positionalArg() || join(MEMORY_DIR, `backup-${Date.now()}.json`);
 
     const result: Record<string, Memory[]> = {};
@@ -36,24 +36,24 @@ switch (command) {
     }
 
     if (scopeFlag !== "global") {
-      if (projectName) {
-        const pDb = projectDb(projectName);
-        result[projectName] = pDb.query("SELECT * FROM memories ORDER BY id").all() as Memory[];
-      } else {
-        const projectsDir = join(MEMORY_DIR, "projects");
-        try {
-          const files = readdirSync(projectsDir).filter((f) => f.endsWith(".db"));
-          for (const file of files) {
-            const name = basename(file, ".db");
-            const pDb = projectDb(name);
-            const rows = pDb.query("SELECT * FROM memories ORDER BY id").all() as Memory[];
-            if (rows.length > 0) {
-              result[name] = rows;
-            }
+      const projectsDir = join(MEMORY_DIR, "projects");
+      try {
+        // New structure: projects/<dir-name>/memory.db
+        const dirs = readdirSync(projectsDir).filter((d) => {
+          const full = join(projectsDir, d);
+          return statSync(full).isDirectory() && existsSync(join(full, "memory.db"));
+        });
+        for (const dir of dirs) {
+          const dbPath = join(projectsDir, dir, "memory.db");
+          const db = new Database(dbPath, { readonly: true });
+          const rows = db.query("SELECT * FROM memories ORDER BY id").all() as Memory[];
+          if (rows.length > 0) {
+            result[dir] = rows;
           }
-        } catch {
-          // projects dir may not exist
+          db.close();
         }
+      } catch {
+        // projects dir may not exist
       }
     }
 
@@ -76,7 +76,8 @@ switch (command) {
     let merged = 0;
 
     for (const [label, memories] of Object.entries(data)) {
-      const db = label === "global" ? globalDb() : projectDb(label);
+      // label is "global" or a dir-name like "-home-zhangbh-my-app"
+      const db = label === "global" ? globalDb() : projectDb("/" + label.replace(/-/g, "/"));
       for (const m of memories) {
         const r = addMemory(
           db,
@@ -106,14 +107,12 @@ switch (command) {
     console.error("Commands:");
     console.error("  export [output.json]          Export all memories");
     console.error("    --global                    Export only global memories");
-    console.error("    --project <name>            Export only a specific project");
     console.error("");
     console.error("  import <file.json>            Import memories from backup");
     console.error("");
     console.error("Examples:");
     console.error("  bun run src/cli.ts export ./backup.json");
     console.error("  bun run src/cli.ts export --global");
-    console.error("  bun run src/cli.ts export --project my-app");
     console.error("  bun run src/cli.ts import ./backup.json");
     process.exit(command ? 1 : 0);
 }

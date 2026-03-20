@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   globalDb,
   projectDb,
+  sharedDb,
   addMemory,
   searchMemories,
   listMemories,
@@ -30,36 +31,37 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-// P2-3: Enhanced project name detection — walk up to find project root
-function resolveProjectName(): string {
-  if (process.env.PROJECT_NAME) return process.env.PROJECT_NAME;
+// P2-3: Enhanced project detection — walk up to find project root
+const PROJECT_MARKERS = [
+  ".git", "package.json", "Cargo.toml", "go.mod",
+  "pyproject.toml", ".svn", "pom.xml", "build.gradle",
+];
 
+function resolveProjectRoot(): string {
   let dir = process.cwd();
-  const markers = [
-    ".git", "package.json", "Cargo.toml", "go.mod",
-    "pyproject.toml", ".svn", "pom.xml", "build.gradle",
-  ];
-
   for (let i = 0; i < 10; i++) {
-    for (const marker of markers) {
-      if (existsSync(join(dir, marker))) {
-        return basename(dir) || "default";
-      }
+    for (const marker of PROJECT_MARKERS) {
+      if (existsSync(join(dir, marker))) return dir;
     }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
+  return process.cwd();
+}
 
-  const parts = process.cwd().split("/").filter(Boolean);
-  return parts[parts.length - 1] || "default";
+function resolveProjectName(): string {
+  if (process.env.PROJECT_NAME) return process.env.PROJECT_NAME;
+  return basename(resolveProjectRoot()) || "default";
 }
 
 function getTargetDb(scope: MemoryScope) {
-  const projectName = resolveProjectName();
+  const root = resolveProjectRoot();
   if (scope === "global") return [globalDb()];
-  if (scope === "project") return [projectDb(projectName)];
-  return [globalDb(), projectDb(projectName)];
+  if (scope === "project") return [projectDb(root)];
+  if (scope === "shared") return [sharedDb(root)];
+  // "both" = global + project (shared is opt-in, not included)
+  return [globalDb(), projectDb(root)];
 }
 
 // P3-1: formatMemory with optional context display
@@ -88,9 +90,9 @@ server.tool(
       .optional()
       .describe("Importance level 1-10 (default 5)"),
     scope: z
-      .enum(["global", "project"])
+      .enum(["global", "project", "shared"])
       .optional()
-      .describe("Where to save: 'global' (all projects) or 'project' (current project only). Default: project"),
+      .describe("Where to save: 'global' (all projects), 'project' (current project, local), or 'shared' (team-shared, stored in project dir). Default: project"),
     source: z
       .enum(["auto", "manual"])
       .optional()
@@ -103,7 +105,9 @@ server.tool(
   },
   async (args) => {
     const scope = args.scope || "project";
-    const db = scope === "global" ? globalDb() : projectDb(resolveProjectName());
+    const db = scope === "global" ? globalDb()
+             : scope === "shared" ? sharedDb(resolveProjectRoot())
+             : projectDb(resolveProjectRoot());
     const memory = addMemory(
       db,
       args.content,
@@ -120,13 +124,14 @@ server.tool(
       };
     }
 
+    let text = `Memory saved (${scope}): ${formatMemory(memory)}`;
+    if (scope === "shared") {
+      const dbPath = join(resolveProjectRoot(), ".cursor", "memory", "shared.db");
+      text += `\n📁 Shared memory saved to: ${dbPath}`;
+    }
+
     return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Memory saved (${scope}): ${formatMemory(memory)}`,
-        },
-      ],
+      content: [{ type: "text" as const, text }],
     };
   }
 );
@@ -139,9 +144,9 @@ server.tool(
     query: z.string().describe("Search query (keywords or natural language)"),
     category: z.enum(CATEGORY_VALUES).optional().describe("Filter by category"),
     scope: z
-      .enum(["global", "project", "both"])
+      .enum(["global", "project", "shared", "both"])
       .optional()
-      .describe("Search scope: global, project, or both (default: both)"),
+      .describe("Search scope: global, project, shared, or both (default: both, does not include shared)"),
     limit: z.number().min(1).max(50).optional().describe("Max results (default 20)"),
   },
   async (args) => {
@@ -151,8 +156,9 @@ server.tool(
     const results: string[] = [];
 
     for (const db of dbs) {
-      const isGlobal = db === globalDb();
-      const scopeLabel = isGlobal ? "global" : "project";
+      const scopeLabel = db === globalDb() ? "global"
+                       : db === sharedDb(resolveProjectRoot()) ? "shared"
+                       : "project";
       const memories = searchMemories(
         db,
         args.query,
@@ -187,9 +193,9 @@ server.tool(
   {
     category: z.enum(CATEGORY_VALUES).optional().describe("Filter by category"),
     scope: z
-      .enum(["global", "project", "both"])
+      .enum(["global", "project", "shared", "both"])
       .optional()
-      .describe("List scope: global, project, or both (default: both)"),
+      .describe("List scope: global, project, shared, or both (default: both, does not include shared)"),
     limit: z.number().min(1).max(50).optional().describe("Max results (default 20)"),
   },
   async (args) => {
@@ -199,8 +205,9 @@ server.tool(
     const results: string[] = [];
 
     for (const db of dbs) {
-      const isGlobal = db === globalDb();
-      const scopeLabel = isGlobal ? "global" : "project";
+      const scopeLabel = db === globalDb() ? "global"
+                       : db === sharedDb(resolveProjectRoot()) ? "shared"
+                       : "project";
       const memories = listMemories(
         db,
         args.category as MemoryCategory | undefined,
@@ -234,13 +241,15 @@ server.tool(
   {
     id: z.number().describe("Memory ID to delete"),
     scope: z
-      .enum(["global", "project"])
+      .enum(["global", "project", "shared"])
       .optional()
-      .describe("Which database to delete from: global or project (default: project)"),
+      .describe("Which database to delete from: global, project, or shared (default: project)"),
   },
   async (args) => {
     const scope = args.scope || "project";
-    const db = scope === "global" ? globalDb() : projectDb(resolveProjectName());
+    const db = scope === "global" ? globalDb()
+             : scope === "shared" ? sharedDb(resolveProjectRoot())
+             : projectDb(resolveProjectRoot());
     const deleted = deleteMemory(db, args.id);
     return {
       content: [
@@ -271,13 +280,15 @@ server.tool(
       .optional()
       .describe("New context about when/why this memory exists, max 100 chars"),
     scope: z
-      .enum(["global", "project"])
+      .enum(["global", "project", "shared"])
       .optional()
-      .describe("Which database: global or project (default: project)"),
+      .describe("Which database: global, project, or shared (default: project)"),
   },
   async (args) => {
     const scope = args.scope || "project";
-    const db = scope === "global" ? globalDb() : projectDb(resolveProjectName());
+    const db = scope === "global" ? globalDb()
+             : scope === "shared" ? sharedDb(resolveProjectRoot())
+             : projectDb(resolveProjectRoot());
     try {
       const memory = updateMemory(
         db,
@@ -322,9 +333,9 @@ server.tool(
       .describe("Max memories to return (default 30)"),
   },
   async (args) => {
-    const projectName = args.project_name || resolveProjectName();
+    const projectRoot = args.project_name || resolveProjectRoot();
     const limit = args.limit || 30;
-    const memories = getContext(projectName, limit);
+    const memories = getContext(projectRoot, limit);
 
     if (memories.length === 0) {
       return {

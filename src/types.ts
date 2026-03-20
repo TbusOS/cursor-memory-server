@@ -7,7 +7,7 @@ export type MemoryCategory =
   | "general";
 
 export type MemorySource = "auto" | "manual";
-export type MemoryScope = "global" | "project" | "both";
+export type MemoryScope = "global" | "project" | "shared" | "both";
 
 export interface Memory {
   id: number;
