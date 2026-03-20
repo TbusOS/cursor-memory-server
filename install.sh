@@ -100,12 +100,12 @@ echo ""
 echo "[5/6] 安装全局 Cursor Rule..."
 mkdir -p "$GLOBAL_RULES_DIR"
 
-if [ -f "$GLOBAL_RULES_DIR/memory-auto.md" ]; then
-  cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.md"
-  ok "Cursor Rule 已更新: $GLOBAL_RULES_DIR/memory-auto.md"
+if [ -f "$GLOBAL_RULES_DIR/memory-auto.mdc" ]; then
+  cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.mdc"
+  ok "Cursor Rule 已更新: $GLOBAL_RULES_DIR/memory-auto.mdc"
 else
-  cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.md"
-  ok "Cursor Rule 已创建: $GLOBAL_RULES_DIR/memory-auto.md"
+  cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.mdc"
+  ok "Cursor Rule 已创建: $GLOBAL_RULES_DIR/memory-auto.mdc"
 fi
 
 # --- 6. 安装全局 Hooks ---
@@ -174,7 +174,7 @@ echo -e " ${GREEN}安装完成!${NC}"
 echo "======================================"
 echo ""
 echo "  MCP 配置:   $MCP_CONFIG"
-echo "  Cursor Rule: $GLOBAL_RULES_DIR/memory-auto.md"
+echo "  Cursor Rule: $GLOBAL_RULES_DIR/memory-auto.mdc"
 echo "  Hooks:       $HOOKS_FILE"
 echo "  数据存储:    $MEMORY_DIR"
 echo ""
