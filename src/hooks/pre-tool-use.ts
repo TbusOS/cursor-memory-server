@@ -35,6 +35,29 @@ if (matched) {
     decision: "deny",
     message: "⚠️ 检测到敏感信息（疑似凭据/密钥），已阻止保存。请移除敏感内容后重试，或只记录事实（如"项目使用 AWS S3"），不要包含具体密钥。",
   }));
-} else {
-  console.log(JSON.stringify({}));
+  process.exit(0);
 }
+
+// Block meta-instruction saves: detect when AI tries to save the stop hook message itself
+const META_PATTERNS = [
+  /对话收尾.*记忆策略/,
+  /对话即将结束.*回顾/,
+  /SYSTEM\s*HOOK/i,
+  /无需保存.*即可/,
+  /memory_add\s*保存/,
+  /简单问答.*不必保存/,
+  /对话.*不需要.*保存记忆/,
+  /保存.*对下次有用的信息/,
+];
+
+const isMeta = META_PATTERNS.some(p => p.test(content));
+
+if (isMeta) {
+  console.log(JSON.stringify({
+    decision: "deny",
+    message: "⚠️ 检测到你正在保存系统提示本身，而不是对话内容。请保存本次对话讨论的具体技术内容，不要保存系统 hook 的指令。",
+  }));
+  process.exit(0);
+}
+
+console.log(JSON.stringify({}));

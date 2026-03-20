@@ -4,6 +4,7 @@ export type MemoryCategory =
   | "preference"
   | "progress"
   | "bug"
+  | "conversation"
   | "general";
 
 export type MemorySource = "auto" | "manual";
@@ -21,6 +22,7 @@ export interface Memory {
   access_count: number;
   context: string | null;
   archived: number;
+  session_id: string | null;
 }
 
 export interface AddMemoryInput {

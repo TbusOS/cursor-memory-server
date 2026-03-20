@@ -24,13 +24,6 @@
         "command": "bun run /path/to/cursor-memory-server/src/hooks/pre-compact.ts",
         "timeout": 3
       }
-    ],
-    "stop": [
-      {
-        "command": "bun run /path/to/cursor-memory-server/src/hooks/stop.ts",
-        "timeout": 3,
-        "loop_limit": 1
-      }
     ]
   }
 }

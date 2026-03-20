@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MCP_CONFIG="$HOME/.cursor/mcp.json"
 MEMORY_DIR="$HOME/.cursor/memory"
 HOOKS_FILE="$HOME/.cursor/hooks.json"
-GLOBAL_RULES_DIR="$HOME/.cursor/rules"
+SKILLS_DIR="$HOME/.cursor/skills/memory"
+RULES_DIR="$HOME/.cursor/rules"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -95,18 +96,24 @@ MCPEOF
   ok "已创建 MCP 配置"
 fi
 
-# --- 5. 安装全局 Cursor Rule ---
+# --- 5. 安装 Agent Skill + Rule ---
 echo ""
-echo "[5/6] 安装全局 Cursor Rule..."
-mkdir -p "$GLOBAL_RULES_DIR"
+echo "[5/6] 安装 Agent Skill + Rule..."
+mkdir -p "$SKILLS_DIR"
+mkdir -p "$RULES_DIR"
 
-if [ -f "$GLOBAL_RULES_DIR/memory-auto.mdc" ]; then
-  cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.mdc"
-  ok "Cursor Rule 已更新: $GLOBAL_RULES_DIR/memory-auto.mdc"
-else
-  cp "$SCRIPT_DIR/cursor-rule-template.md" "$GLOBAL_RULES_DIR/memory-auto.mdc"
-  ok "Cursor Rule 已创建: $GLOBAL_RULES_DIR/memory-auto.mdc"
+cp "$SCRIPT_DIR/skill/SKILL.md" "$SKILLS_DIR/SKILL.md"
+cp "$SCRIPT_DIR/rule/memory-identity.mdc" "$RULES_DIR/memory-identity.mdc"
+
+# Clean up legacy Rule if exists
+LEGACY_RULE="$RULES_DIR/memory-auto.mdc"
+if [ -f "$LEGACY_RULE" ]; then
+  rm "$LEGACY_RULE"
+  ok "已删除旧版 Cursor Rule: $LEGACY_RULE"
 fi
+
+ok "Agent Skill: $SKILLS_DIR/SKILL.md"
+ok "Always-on Rule: $RULES_DIR/memory-identity.mdc"
 
 # --- 6. 安装全局 Hooks ---
 echo ""
@@ -150,13 +157,11 @@ if [ -f "$HOOKS_FILE" ]; then
         timeout: 3
       });
 
-      // Merge stop hook
-      cfg.hooks.stop = cfg.hooks.stop || [];
-      cfg.hooks.stop.push({
-        command: 'bun run $SCRIPT_DIR/src/hooks/stop.ts',
-        timeout: 3,
-        loop_limit: 1
-      });
+      // Remove legacy stop hook if present (causes UX issues)
+      if (cfg.hooks.stop) {
+        cfg.hooks.stop = cfg.hooks.stop.filter(h => !h.command.includes('cursor-memory-server'));
+        if (cfg.hooks.stop.length === 0) delete cfg.hooks.stop;
+      }
 
       fs.writeFileSync('$HOOKS_FILE', JSON.stringify(cfg, null, 2) + '\n');
     "
@@ -174,9 +179,11 @@ echo -e " ${GREEN}安装完成!${NC}"
 echo "======================================"
 echo ""
 echo "  MCP 配置:   $MCP_CONFIG"
-echo "  Cursor Rule: $GLOBAL_RULES_DIR/memory-auto.mdc"
+echo "  Agent Skill: $SKILLS_DIR/SKILL.md"
+echo "  Rule:        $RULES_DIR/memory-identity.mdc"
 echo "  Hooks:       $HOOKS_FILE"
 echo "  数据存储:    $MEMORY_DIR"
 echo ""
 echo -e "  ${BOLD}重启 Cursor IDE 即可使用${NC}"
+echo -e "  在对话中输入 ${BOLD}/memory${NC} 可手动触发记忆技能"
 echo ""

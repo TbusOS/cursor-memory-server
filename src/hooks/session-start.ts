@@ -1,13 +1,33 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, dirname } from "path";
 
 const MEMORY_DIR = process.env.MEMORY_DIR || join(process.env.HOME!, ".cursor", "memory");
 // Below this threshold, inject full content; above, inject index only
 const FULL_THRESHOLD = parseInt(process.env.MEMORY_FULL_THRESHOLD || "15");
 
+const PROJECT_MARKERS = [
+  ".git", "package.json", "Cargo.toml", "go.mod",
+  "pyproject.toml", ".svn", "pom.xml", "build.gradle",
+];
+
+// Same logic as MCP server's resolveProjectRoot()
+function resolveProjectRoot(startDir: string): string {
+  let dir = startDir;
+  for (let i = 0; i < 10; i++) {
+    for (const marker of PROJECT_MARKERS) {
+      if (existsSync(join(dir, marker))) return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return startDir;
+}
+
 const input = JSON.parse(await Bun.stdin.text());
-const root: string = input.workspace_roots?.[0] || process.cwd();
+const workspaceRoot: string = input.workspace_roots?.[0] || process.cwd();
+const root = resolveProjectRoot(workspaceRoot);
 
 function openDb(dbPath: string): Database | null {
   if (!existsSync(dbPath)) return null;
@@ -32,43 +52,79 @@ function getFullMemories(db: Database | null, limit: number, scope: string): str
   if (!db) return [];
   try {
     const rows = db.query(`
-      SELECT id, content, category, importance, context, updated_at
+      SELECT id, content, category, importance, context, updated_at, session_id
       FROM memories
       ORDER BY importance * (1.0 / (1 + (julianday('now') - julianday(updated_at)))) DESC
       LIMIT ?
     `).all(limit) as any[];
     return rows.map((m: any) => {
       const ctx = m.context ? ` [ctx: ${m.context}]` : "";
-      return `[${scope}][#${m.id}] (${m.category}, imp:${m.importance}${ctx}) ${m.content}`;
+      const sid = m.session_id ? ` [session: ${m.session_id}]` : "";
+      return `[${scope}][#${m.id}] (${m.category}, imp:${m.importance}${ctx}${sid}) ${m.content}`;
     });
   } catch {
     return [];
   }
 }
 
-// Index line: compact, ~20 tokens each
+// Index line: compact, ~30 tokens each
 function getIndexMemories(db: Database | null, limit: number, scope: string): string[] {
   if (!db) return [];
   try {
     const rows = db.query(`
-      SELECT id, content, category, importance, updated_at
+      SELECT id, content, category, importance, updated_at, session_id
       FROM memories
       ORDER BY importance * (1.0 / (1 + (julianday('now') - julianday(updated_at)))) DESC
       LIMIT ?
     `).all(limit) as any[];
     return rows.map((m: any) => {
-      // Truncate content to first 40 chars as title
-      const title = m.content.length > 40 ? m.content.slice(0, 40) + "..." : m.content;
-      return `[${scope}][#${m.id}] ${m.category} imp:${m.importance} | ${title}`;
+      // Truncate content to first 80 chars as title (40 was too short for Chinese)
+      const title = m.content.length > 80 ? m.content.slice(0, 80) + "..." : m.content;
+      const date = m.updated_at?.slice(0, 10) || "";
+      return `[${scope}][#${m.id}] ${m.category} imp:${m.importance} ${date} | ${title}`;
     });
   } catch {
     return [];
   }
 }
 
-// Convert "/home/zhangbh/my-app" → "home-zhangbh-my-app" (Claude Code style)
-const dirName = root.replace(/^\//, "").replace(/\//g, "-");
-const projDb = openDb(join(MEMORY_DIR, "projects", dirName, "memory.db"));
+// Get the most recent conversation summary (category='conversation') for prominent display
+function getLastConversation(db: Database | null, scope: string): string | null {
+  if (!db) return null;
+  try {
+    const row = db.query(`
+      SELECT id, content, updated_at, session_id
+      FROM memories
+      WHERE category = 'conversation'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get() as any;
+    if (!row) return null;
+    const date = row.updated_at?.slice(0, 10) || "";
+    return `[${scope}][#${row.id}] ${date} ${row.content}`;
+  } catch {
+    return null;
+  }
+}
+
+// Find project memory DB: try exact match first, then walk up parent paths
+// This handles the case where MCP server's cwd differs from workspace root
+function findProjectDb(projectRoot: string): Database | null {
+  let dir = projectRoot;
+  for (let i = 0; i < 10; i++) {
+    const dirName = dir.replace(/^\//, "").replace(/\//g, "-");
+    const dbPath = join(MEMORY_DIR, "projects", dirName, "memory.db");
+    const db = openDb(dbPath);
+    if (db && countMemories(db) > 0) return db;
+    if (db) db.close();
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+const projDb = findProjectDb(root);
 const gDb = openDb(join(MEMORY_DIR, "global.db"));
 const sDb = openDb(join(root, ".cursor", "memory", "shared.db"));
 
@@ -79,6 +135,13 @@ const total = projCount + globalCount + sharedCount;
 
 let context = "";
 
+// Check for last conversation summary from any scope
+const lastConvLines: string[] = [];
+for (const [db, scope] of [[projDb, "project"], [sDb, "shared"], [gDb, "global"]] as const) {
+  const conv = getLastConversation(db as Database | null, scope);
+  if (conv) lastConvLines.push(conv);
+}
+
 if (total === 0) {
   context = "No memories stored yet. Important decisions and progress will be saved automatically.";
 } else if (total <= FULL_THRESHOLD) {
@@ -87,14 +150,19 @@ if (total === 0) {
   const sharedLines = getFullMemories(sDb, sharedCount, "shared");
   const globalLines = getFullMemories(gDb, globalCount, "global");
   const all = [...projLines, ...sharedLines, ...globalLines];
-  context = [
+  const sections: string[] = [
     `# Recalled Memories (${total} items — full)`,
-    "",
-    all.join("\n"),
-    "",
+  ];
+
+  if (lastConvLines.length > 0) {
+    sections.push("", "## Last Conversation", "", ...lastConvLines);
+  }
+
+  sections.push("", "## All Memories", "", all.join("\n"), "",
     "---",
     "All memories loaded in full. Use memory_search for keyword filtering.",
-  ].join("\n");
+  );
+  context = sections.join("\n");
 } else {
   // Many memories — inject lightweight index + top 5 full
   const topProjFull = getFullMemories(projDb, 3, "project");
@@ -113,21 +181,24 @@ if (total === 0) {
       return !fullIds.has(id);
     });
 
-  context = [
+  const sections: string[] = [
     `# Recalled Memories (${total} items)`,
-    "",
-    "## Recent & Important (full content)",
-    "",
+  ];
+
+  if (lastConvLines.length > 0) {
+    sections.push("", "## Last Conversation", "", ...lastConvLines);
+  }
+
+  sections.push(
+    "", "## Recent & Important (full content)", "",
     fullLines.join("\n"),
-    "",
-    "## Index (use memory_search to get full details)",
-    "",
+    "", "## Index (use memory_search to get full details)", "",
     indexLines.join("\n"),
-    "",
-    "---",
+    "", "---",
     "Above is a lightweight index. To read the full content of any memory, use `memory_search` with relevant keywords.",
     "Do NOT call memory_get_context — index already loaded above.",
-  ].join("\n");
+  );
+  context = sections.join("\n");
 }
 
 projDb?.close();

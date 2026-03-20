@@ -71,6 +71,11 @@ const MIGRATIONS: { version: number; sql: string; description: string }[] = [
     sql: "ALTER TABLE memories ADD COLUMN archived INTEGER DEFAULT 0;",
     description: "add archived field",
   },
+  {
+    version: 4,
+    sql: "ALTER TABLE memories ADD COLUMN session_id TEXT DEFAULT NULL;",
+    description: "add session_id for conversation grouping",
+  },
 ];
 
 function runMigrations(db: Database) {
@@ -160,7 +165,7 @@ function stripPrivateTags(content: string): string {
 }
 
 // --- Content length limit ---
-const MAX_MEMORY_LENGTH = parseInt(process.env.MAX_MEMORY_LENGTH || "500");
+const MAX_MEMORY_LENGTH = parseInt(process.env.MAX_MEMORY_LENGTH || "1500");
 
 function truncateContent(content: string): string {
   if (content.length <= MAX_MEMORY_LENGTH) return content;
@@ -179,7 +184,8 @@ export function addMemory(
   tags: string | null = null,
   importance: number = 5,
   source: MemorySource = "auto",
-  context: string | null = null
+  context: string | null = null,
+  sessionId: string | null = null
 ): Memory {
   const cleaned = truncateContent(stripPrivateTags(content));
   if (!cleaned) {
@@ -198,19 +204,23 @@ export function addMemory(
     };
   }
 
-  const existing = searchMemories(db, cleaned, undefined, 1);
-  if (existing.length > 0) {
-    const similarity = contentOverlap(existing[0].content, cleaned);
-    if (similarity > 0.8) {
-      return updateMemory(db, existing[0].id, cleaned, category, tags, importance, context);
+  // Check top 3 search results for duplicates
+  const existing = searchMemories(db, cleaned, undefined, 3);
+  for (const mem of existing) {
+    const similarity = contentOverlap(mem.content, cleaned);
+    if (similarity > 0.35) {
+      return updateMemory(db, mem.id, cleaned, category, tags, importance, context);
     }
   }
 
+  // Auto-generate session_id if not provided (date-based for grouping)
+  const sid = sessionId || new Date().toISOString().slice(0, 13).replace("T", "-");
+
   const stmt = db.prepare(`
-    INSERT INTO memories (content, category, tags, importance, source, context)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO memories (content, category, tags, importance, source, context, session_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
-  stmt.run(cleaned, category, tags, importance, source, context);
+  stmt.run(cleaned, category, tags, importance, source, context, sid);
   const row = db.query("SELECT last_insert_rowid() as id").get() as { id: number };
   return db.query("SELECT * FROM memories WHERE id = ?").get(row.id) as Memory;
 }
@@ -298,9 +308,11 @@ function searchByLike(
 
 function extractKeywords(text: string): string[] {
   const cjkChunks = text.match(/[\u4e00-\u9fff]+/g) || [];
+  // Split Latin text on whitespace AND common delimiters, then lowercase
   const latinWords = text
     .replace(/[\u4e00-\u9fff]+/g, " ")
-    .split(/\s+/)
+    .split(/[\s\/\(\)（）\[\]【】,，;；:：·、]+/)
+    .map((w) => w.toLowerCase())
     .filter((w) => w.length > 1);
 
   const keywords: string[] = [...latinWords];
@@ -419,14 +431,29 @@ function recencyWeight(dateStr: string): number {
 }
 
 // P0-1: Fixed — use extractKeywords instead of split(/\s+/) for CJK support
+// Technical/Latin tokens get 3x weight since they're more meaningful for dedup
 function contentOverlap(a: string, b: string): number {
-  const setA = new Set(extractKeywords(a));
-  const setB = new Set(extractKeywords(b));
-  if (setA.size === 0 && setB.size === 0) return 1;
-  if (setA.size === 0 || setB.size === 0) return 0;
-  let overlap = 0;
-  for (const w of setA) if (setB.has(w)) overlap++;
-  return (2 * overlap) / (setA.size + setB.size);
+  const kwA = extractKeywords(a);
+  const kwB = extractKeywords(b);
+  if (kwA.length === 0 && kwB.length === 0) return 1;
+  if (kwA.length === 0 || kwB.length === 0) return 0;
+
+  const isTechnical = (w: string) => /[a-zA-Z0-9_\-\/.]/.test(w);
+  const TECH_WEIGHT = 3;
+
+  let totalA = 0, totalB = 0, overlap = 0;
+  const setB = new Set(kwB);
+
+  for (const w of new Set(kwA)) {
+    const weight = isTechnical(w) ? TECH_WEIGHT : 1;
+    totalA += weight;
+    if (setB.has(w)) overlap += weight;
+  }
+  for (const w of new Set(kwB)) {
+    totalB += isTechnical(w) ? TECH_WEIGHT : 1;
+  }
+
+  return (2 * overlap) / (totalA + totalB);
 }
 
 export function closeAll() {

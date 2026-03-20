@@ -23,6 +23,7 @@ const CATEGORY_VALUES = [
   "preference",
   "progress",
   "bug",
+  "conversation",
   "general",
 ] as const;
 
@@ -75,13 +76,13 @@ function formatMemory(m: any, scope?: string, showContext: boolean = false): str
 // --- Tool: memory_add ---
 server.tool(
   "memory_add",
-  "Save a new memory. Use this to persist important decisions, preferences, architecture choices, progress notes, or bug records.",
+  "Save a new memory. Use this to persist important decisions, preferences, architecture choices, progress notes, bug records, or conversation summaries. For conversation summaries, use category='conversation' with structured content.",
   {
     content: z.string().describe("The memory content to save"),
     category: z
       .enum(CATEGORY_VALUES)
       .optional()
-      .describe("Category: decision, architecture, preference, progress, bug, general"),
+      .describe("Category: decision, architecture, preference, progress, bug, conversation (for chat summaries), general"),
     tags: z.string().optional().describe("Comma-separated tags for this memory"),
     importance: z
       .number()
@@ -102,6 +103,10 @@ server.tool(
       .max(100)
       .optional()
       .describe("Brief context about when/why this memory was created, max 100 chars"),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Session/conversation ID for grouping related memories. Auto-generated if not provided (YYYY-MM-DD-HH format). Use same session_id for all memories from one conversation."),
   },
   async (args) => {
     const scope = args.scope || "project";
@@ -115,7 +120,8 @@ server.tool(
       args.tags || null,
       args.importance || 5,
       args.source || "auto",
-      args.context || null
+      args.context || null,
+      args.session_id || null
     );
 
     if (memory.id === -1) {
